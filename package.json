@@ -1,0 +1,15 @@
+{
+  "name": "knowledgepilot-ai",
+  "version": "1.0.0",
+  "description": "A multi-user AI knowledge assistant. Users can upload PDFs, Word documents, or text files, which go through a document ingestion pipeline where the content is extracted, cleaned, chunked, converted into embeddings, and stored in a vector database.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
