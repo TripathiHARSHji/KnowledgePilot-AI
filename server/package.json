@@ -1,21 +1,26 @@
 {
   "name": "server",
   "version": "1.0.0",
+  "description": "KnowledgePilot backend",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon index.js",
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.2",
     "morgan": "^1.11.0"
+    ,"pg": "^8.16.3"
+    ,"redis": "^5.8.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
