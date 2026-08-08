@@ -138,7 +138,66 @@ function assembleContext(chunks) {
     .join('\n\n---\n\n');
 }
 
+const GEMINI_LLM_MODEL = process.env.GEMINI_LLM_MODEL || 'chat-bison-001';
+const GEMINI_LLM_URL =
+  process.env.GEMINI_LLM_URL ||
+  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_LLM_MODEL}:generate`;
+
+async function buildGeminiGeneration(prompt, options = {}) {
+  const body = {
+    prompt: { text: prompt },
+    temperature: typeof options.temperature === 'number' ? options.temperature : 0.2,
+    maxOutputTokens: options.maxOutputTokens || 512,
+  };
+
+  const response = await fetch(`${GEMINI_LLM_URL}?key=${encodeURIComponent(GEMINI_API_KEY)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new Error(`Gemini generation failed (${response.status}): ${bodyText}`);
+  }
+
+  const payload = await response.json();
+  // Attempt to extract text from payload
+  const candidates = payload?.candidates || payload?.outputs || [];
+  if (Array.isArray(candidates) && candidates.length > 0) {
+    // Some payload formats have `candidates[0].output` or `candidates[0].content` or `candidates[0].text`
+    const first = candidates[0];
+    return (
+      first.output || first.content || first.text || (typeof first === 'string' ? first : '')
+    );
+  }
+
+  // Fallback: try top-level `output` or `content`
+  return payload?.output || payload?.content || '';
+}
+
+async function generateAnswer(question, context, options = {}) {
+  const system = options.system ||
+    'You are a helpful assistant. Answer concisely using only the provided sources. When referencing information, cite the source like "(SOURCE 1)".';
+
+  const prompt = `${system}\n\nCONTEXT:\n${context}\n\nQUESTION:\n${question}\n\nAnswer:`;
+
+  try {
+    if (!GEMINI_API_KEY) {
+      // No external LLM key - return a safe local fallback that includes retrieved context
+      return `No LLM key configured. Retrieved context:\n\n${context}`;
+    }
+
+    const text = await buildGeminiGeneration(prompt, options);
+    return String(text || '').trim();
+  } catch (error) {
+    // On failure, return the context as a fallback and include error in details
+    return `Error generating answer: ${error.message}. Retrieved context:\n\n${context}`;
+  }
+}
+
 module.exports = {
   queryDocuments,
   assembleContext,
+  generateAnswer,
 };

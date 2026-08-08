@@ -9,7 +9,7 @@ const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
 const { listDocumentsForUser, uploadDocument } = require('./services/document-service');
-const { queryDocuments, assembleContext } = require('./services/query-service');
+const { queryDocuments, assembleContext, generateAnswer } = require('./services/query-service');
 
 function createSyntheticFile(payload, fallbackName) {
   if (typeof payload === 'string') {
@@ -198,12 +198,20 @@ function buildApp() {
       const result = await queryDocuments(request.user.id, question, { topK });
       const context = assembleContext(result.chunks || []);
 
+      console.debug('RAG: retrieved sources count=', (result.chunks || []).length);
+
+      const answer = await generateAnswer(question, context, { maxOutputTokens: 512 });
+
+      // Log retrieved sources for debugging
+      console.info('RAG: sources=', (result.chunks || []).map((c) => ({ id: c.id, position: c.metadata?.position })));
+
       response.json({
         question,
         embeddingModel: result.embeddingModel,
         retrievedCount: (result.chunks || []).length,
         context,
         sources: result.chunks || [],
+        answer,
       });
     } catch (error) {
       next(error);
