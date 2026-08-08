@@ -590,7 +590,7 @@ setMessagesBySession((current) => {
     <main className="layout-shell">
       <header className="topbar">
         <div>
-          <p className="badge">KnowledgePilot AI</p>
+          <p className="badge">*beta</p>
           <h1>KnowledgePilot AI</h1>
         </div>
         <div className="topbar-right">

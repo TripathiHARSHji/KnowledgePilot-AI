@@ -9,12 +9,14 @@ const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 768);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004';
+  process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-2';
 const GEMINI_EMBEDDING_URL =
   process.env.GEMINI_EMBEDDING_URL ||
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBEDDING_MODEL}:embedContent`;
 const EMBEDDING_FALLBACK =
-  String(process.env.EMBEDDING_FALLBACK || 'local-hash').trim().toLowerCase() !== 'none';
+  String(process.env.EMBEDDING_FALLBACK || 'none')
+    .trim()
+    .toLowerCase() !== 'none';
 const pdfParse =
   typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule?.default;
 const PDFParseClass =
@@ -206,13 +208,15 @@ async function buildGeminiEmbedding(text) {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      content: {
-        parts: [{ text }],
-      },
-      taskType: 'RETRIEVAL_DOCUMENT',
-      outputDimensionality: EMBEDDING_DIMENSIONS,
-    }),
+body: JSON.stringify({
+  content: {
+    parts: [{ text }],
+  },
+  embedContentConfig: {
+    taskType: 'RETRIEVAL_DOCUMENT',
+    outputDimensionality: EMBEDDING_DIMENSIONS,
+  },
+}),
   });
 
   if (!response.ok) {
