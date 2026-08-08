@@ -8,11 +8,20 @@ const busboy = require('busboy');
 const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
-const { listDocumentsForUser, uploadDocument } = require('./services/document-service');
 const {
+  deleteDocumentForUser,
+  listDocumentsForUser,
+  reindexDocumentForUser,
+  uploadDocument,
+} = require('./services/document-service');
+const {
+  createSessionId,
+  deleteSessionForUser,
   queryDocuments,
+  listSessionsForUser,
   assembleContext,
   generateAnswer,
+  loadSessionTranscript,
   loadSessionHistory,
   persistSessionTurn,
 } = require('./services/query-service');
@@ -194,6 +203,54 @@ function buildApp() {
     }
   });
 
+  app.delete('/documents/:documentId', authMiddleware, async (request, response, next) => {
+    try {
+      const result = await deleteDocumentForUser(request.user.id, request.params.documentId);
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/documents/:documentId/reindex', authMiddleware, async (request, response, next) => {
+    try {
+      const result = await reindexDocumentForUser(request.user.id, request.params.documentId);
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/sessions', authMiddleware, async (request, response, next) => {
+    try {
+      const sessions = await listSessionsForUser(request.user.id);
+      response.json({ sessions });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/sessions/:sessionId/messages', authMiddleware, async (request, response, next) => {
+    try {
+      const history = await loadSessionTranscript(request.user.id, request.params.sessionId);
+      response.json({
+        sessionId: request.params.sessionId,
+        messages: history,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/sessions/:sessionId', authMiddleware, async (request, response, next) => {
+    try {
+      await deleteSessionForUser(request.user.id, request.params.sessionId);
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/query', authMiddleware, async (request, response, next) => {
     try {
       const { question, topK, documentId, sessionId } = request.body || {};
@@ -205,9 +262,11 @@ function buildApp() {
         throw new Error('sessionId must be a string when provided');
       }
 
+      const resolvedSessionId = sessionId || createSessionId();
+
       const result = await queryDocuments(request.user.id, question, { topK, documentId });
       const context = assembleContext(result.chunks || []);
-      const history = await loadSessionHistory(request.user.id, sessionId);
+      const history = await loadSessionHistory(request.user.id, resolvedSessionId);
 
       console.debug('RAG: retrieved sources count=', (result.chunks || []).length);
 
@@ -215,7 +274,7 @@ function buildApp() {
         maxOutputTokens: 512,
         history,
       });
-      await persistSessionTurn(request.user.id, sessionId, question, answer);
+      await persistSessionTurn(request.user.id, resolvedSessionId, question, answer);
 
       // Log retrieved sources for debugging
       console.info('RAG: sources=', (result.chunks || []).map((c) => ({ id: c.id, position: c.metadata?.position })));
@@ -227,7 +286,7 @@ function buildApp() {
         context,
         sources: result.chunks || [],
         session: {
-          id: sessionId || null,
+          id: resolvedSessionId,
           memoryTurnCount: history.length,
         },
         answer,

@@ -315,7 +315,122 @@ async function listDocumentsForUser(userId) {
   }));
 }
 
+async function deleteDocumentForUser(userId, documentId) {
+  const parsedDocumentId = Number(documentId);
+  if (!Number.isInteger(parsedDocumentId) || parsedDocumentId < 1) {
+    throw createHttpError(400, 'documentId must be a positive integer');
+  }
+
+  const transaction = await sequelize.transaction();
+  try {
+    const document = await Document.findOne({
+      where: { id: parsedDocumentId, userId },
+      transaction,
+    });
+
+    if (!document) {
+      throw createHttpError(404, 'Document not found');
+    }
+
+    await Chunk.destroy({ where: { documentId: parsedDocumentId, userId }, transaction });
+    await Document.destroy({ where: { id: parsedDocumentId, userId }, transaction });
+
+    await transaction.commit();
+    return {
+      id: parsedDocumentId,
+      deleted: true,
+    };
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
+async function reindexDocumentForUser(userId, documentId) {
+  const parsedDocumentId = Number(documentId);
+  if (!Number.isInteger(parsedDocumentId) || parsedDocumentId < 1) {
+    throw createHttpError(400, 'documentId must be a positive integer');
+  }
+
+  const transaction = await sequelize.transaction();
+  try {
+    const document = await Document.findOne({
+      where: { id: parsedDocumentId, userId },
+      transaction,
+    });
+
+    if (!document) {
+      throw createHttpError(404, 'Document not found');
+    }
+
+    await Document.update(
+      { status: 'processing' },
+      { where: { id: parsedDocumentId, userId }, transaction }
+    );
+
+    const chunks = await Chunk.findAll({
+      where: { documentId: parsedDocumentId, userId },
+      order: [['id', 'ASC']],
+      transaction,
+    });
+
+    if (!chunks.length) {
+      throw createHttpError(400, 'Document has no chunks to re-index');
+    }
+
+    for (const chunk of chunks) {
+      const embedding = await buildEmbedding(chunk.content);
+      const metadata = {
+        ...(chunk.metadata || {}),
+        embedding: embedding.values,
+        embeddingModel: embedding.model,
+      };
+
+      await Chunk.update(
+        {
+          metadata,
+          embeddingId: `local-${parsedDocumentId}-${metadata.position || chunk.id}`,
+          vectorRef: `${embedding.model}:${parsedDocumentId}:${metadata.position || chunk.id}`,
+        },
+        {
+          where: { id: chunk.id },
+          transaction,
+        }
+      );
+
+      await sequelize.query(
+        'UPDATE chunks SET embedding_vector = CAST(:embeddingVector AS vector) WHERE id = :id',
+        {
+          transaction,
+          replacements: {
+            id: chunk.id,
+            embeddingVector: toPgVectorLiteral(embedding.values),
+          },
+        }
+      );
+    }
+
+    await Document.update(
+      { status: 'ready' },
+      { where: { id: parsedDocumentId, userId }, transaction }
+    );
+
+    await transaction.commit();
+
+    return {
+      id: parsedDocumentId,
+      status: 'ready',
+      reindexedChunks: chunks.length,
+    };
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
+  }
+}
+
 module.exports = {
+  deleteDocumentForUser,
   listDocumentsForUser,
+  reindexDocumentForUser,
   uploadDocument,
 };

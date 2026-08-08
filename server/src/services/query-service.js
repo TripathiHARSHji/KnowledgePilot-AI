@@ -1,6 +1,7 @@
 const { sequelize } = require('../db');
 const { createHttpError } = require('../utils/http-error');
 const { getRedisClient } = require('../redis');
+const { randomUUID } = require('crypto');
 
 const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS || 768);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -13,6 +14,7 @@ const EMBEDDING_FALLBACK =
   String(process.env.EMBEDDING_FALLBACK || 'local-hash').trim().toLowerCase() !== 'none';
 const SESSION_MESSAGE_WINDOW = Number(process.env.SESSION_MESSAGE_WINDOW || 8);
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 172800);
+const SESSION_INDEX_MAX = Number(process.env.SESSION_INDEX_MAX || 30);
 
 function simpleHash(value) {
   let hash = 0;
@@ -266,17 +268,52 @@ function buildSessionRedisKey(userId, sessionId) {
   return `session:${userId}:${sessionId}`;
 }
 
+function buildSessionIndexRedisKey(userId) {
+  return `session-index:${userId}`;
+}
+
+function buildSessionMetaRedisKey(userId, sessionId) {
+  return `session-meta:${userId}:${sessionId}`;
+}
+
+function createSessionId() {
+  return randomUUID();
+}
+
+function normalizeSessionId(sessionId) {
+  const normalized = String(sessionId || '').trim();
+  if (!normalized) {
+    throw createHttpError(400, 'sessionId is required');
+  }
+
+  return normalized;
+}
+
+async function ensureRedisConnection(redisClient) {
+  if (redisClient && !redisClient.isOpen) {
+    await redisClient.connect();
+  }
+}
+
 async function loadSessionHistory(userId, sessionId, windowSize = SESSION_MESSAGE_WINDOW) {
   const redisClient = getRedisClient();
   if (!redisClient || !sessionId) {
     return [];
   }
 
-  if (!redisClient.isOpen) {
-    await redisClient.connect();
+  const transcript = await loadSessionTranscript(userId, sessionId);
+  return transcript.slice(-Math.max(1, Number(windowSize) || SESSION_MESSAGE_WINDOW));
+}
+
+async function loadSessionTranscript(userId, sessionId) {
+  const redisClient = getRedisClient();
+  if (!redisClient || !sessionId) {
+    return [];
   }
 
-  const key = buildSessionRedisKey(userId, sessionId);
+  await ensureRedisConnection(redisClient);
+
+  const key = buildSessionRedisKey(userId, normalizeSessionId(sessionId));
   const raw = await redisClient.get(key);
   if (!raw) {
     return [];
@@ -293,7 +330,78 @@ async function loadSessionHistory(userId, sessionId, windowSize = SESSION_MESSAG
     return [];
   }
 
-  return parsed.slice(-Math.max(1, Number(windowSize) || SESSION_MESSAGE_WINDOW));
+  return parsed;
+}
+
+async function listSessionsForUser(userId, limit = SESSION_INDEX_MAX) {
+  const redisClient = getRedisClient();
+  if (!redisClient) {
+    return [];
+  }
+
+  await ensureRedisConnection(redisClient);
+
+  const cappedLimit = Math.min(Math.max(Number(limit) || SESSION_INDEX_MAX, 1), SESSION_INDEX_MAX);
+  const indexKey = buildSessionIndexRedisKey(userId);
+  const sessionIds = await redisClient.zRange(indexKey, 0, cappedLimit - 1, { REV: true });
+
+  if (!sessionIds.length) {
+    return [];
+  }
+
+  const sessions = await Promise.all(
+    sessionIds.map(async (sessionId) => {
+      const metaKey = buildSessionMetaRedisKey(userId, sessionId);
+      const conversationKey = buildSessionRedisKey(userId, sessionId);
+      const [rawMeta, rawHistory] = await Promise.all([
+        redisClient.get(metaKey),
+        redisClient.get(conversationKey),
+      ]);
+
+      let meta = null;
+      try {
+        meta = rawMeta ? JSON.parse(rawMeta) : null;
+      } catch (_error) {
+        meta = null;
+      }
+
+      let history = [];
+      try {
+        history = rawHistory ? JSON.parse(rawHistory) : [];
+      } catch (_error) {
+        history = [];
+      }
+
+      return {
+        id: sessionId,
+        updatedAt: meta?.updatedAt || null,
+        preview: meta?.preview || '',
+        turnCount: Array.isArray(history) ? Math.floor(history.length / 2) : 0,
+      };
+    })
+  );
+
+  return sessions;
+}
+
+async function deleteSessionForUser(userId, sessionId) {
+  const redisClient = getRedisClient();
+  if (!redisClient) {
+    return;
+  }
+
+  await ensureRedisConnection(redisClient);
+
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  const conversationKey = buildSessionRedisKey(userId, normalizedSessionId);
+  const metaKey = buildSessionMetaRedisKey(userId, normalizedSessionId);
+  const indexKey = buildSessionIndexRedisKey(userId);
+
+  await Promise.all([
+    redisClient.del(conversationKey),
+    redisClient.del(metaKey),
+    redisClient.zRem(indexKey, normalizedSessionId),
+  ]);
 }
 
 async function persistSessionTurn(userId, sessionId, question, answer) {
@@ -302,22 +410,39 @@ async function persistSessionTurn(userId, sessionId, question, answer) {
     return;
   }
 
-  if (!redisClient.isOpen) {
-    await redisClient.connect();
-  }
+  await ensureRedisConnection(redisClient);
 
-  const key = buildSessionRedisKey(userId, sessionId);
-  const previous = await loadSessionHistory(userId, sessionId);
-  const next = previous
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  const key = buildSessionRedisKey(userId, normalizedSessionId);
+  const indexKey = buildSessionIndexRedisKey(userId);
+  const metaKey = buildSessionMetaRedisKey(userId, normalizedSessionId);
+  const transcript = await loadSessionTranscript(userId, sessionId);
+  const next = transcript
     .concat([
       { role: 'user', content: question, createdAt: new Date().toISOString() },
       { role: 'assistant', content: answer, createdAt: new Date().toISOString() },
-    ])
-    .slice(-Math.max(2, SESSION_MESSAGE_WINDOW));
+    ]);
 
   await redisClient.set(key, JSON.stringify(next), {
     EX: SESSION_TTL_SECONDS,
   });
+
+  const updatedAt = new Date().toISOString();
+  await redisClient.set(
+    metaKey,
+    JSON.stringify({
+      updatedAt,
+      preview: sanitizeUserPromptText(question).slice(0, 120),
+    }),
+    { EX: SESSION_TTL_SECONDS }
+  );
+
+  await redisClient.zAdd(indexKey, {
+    score: Date.now(),
+    value: normalizedSessionId,
+  });
+  await redisClient.zRemRangeByRank(indexKey, 0, -SESSION_INDEX_MAX - 1);
+  await redisClient.expire(indexKey, SESSION_TTL_SECONDS);
 }
 
 async function generateAnswer(question, context, options = {}) {
@@ -344,6 +469,10 @@ async function generateAnswer(question, context, options = {}) {
 }
 
 module.exports = {
+  createSessionId,
+  listSessionsForUser,
+  deleteSessionForUser,
+  loadSessionTranscript,
   loadSessionHistory,
   persistSessionTurn,
   queryDocuments,
