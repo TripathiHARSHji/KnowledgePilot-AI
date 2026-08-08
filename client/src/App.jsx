@@ -483,8 +483,8 @@ function App() {
     return (
       <main className="auth-shell">
         <section className="auth-card">
-          <p className="badge">KnowledgePilot AI</p>
-          <h1>Search your documents Easily</h1>
+          <p className="badge">*beta</p>
+          <h1>KnowledgePilot AI</h1>
           <p className="subtitle">Sign in to upload files and chat over your own document context.</p>
           <div className="mode-row">
             <button
