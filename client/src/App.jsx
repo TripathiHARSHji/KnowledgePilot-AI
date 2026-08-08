@@ -484,7 +484,7 @@ function App() {
       <main className="auth-shell">
         <section className="auth-card">
           <p className="badge">KnowledgePilot AI</p>
-          <h1>Phase 5 Workspace</h1>
+          <h1>Search your documents Easily</h1>
           <p className="subtitle">Sign in to upload files and chat over your own document context.</p>
           <div className="mode-row">
             <button
@@ -529,7 +529,7 @@ function App() {
           </form>
           {authError ? <p className="error">{authError}</p> : null}
           <p className="hint">
-            For production, switch to httpOnly cookies. This demo stores the JWT in localStorage.
+            @HarshTripathi
           </p>
         </section>
       </main>
