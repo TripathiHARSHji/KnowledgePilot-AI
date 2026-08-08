@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
-
+import { GoogleLogin } from "@react-oauth/google";
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
@@ -17,19 +17,30 @@ function buildSessionId() {
 
 async function revealTextGradually(text, setText) {
   const safeText = String(text || '')
-  if (safeText.length < 80) {
+
+  if (!safeText) {
+    setText('')
+    return
+  }
+
+  // Show short answers immediately
+  if (safeText.length < 150) {
     setText(safeText)
     return
   }
 
-  const chunkSize = Math.ceil(safeText.length / 48)
-  for (let index = chunkSize; index <= safeText.length; index += chunkSize) {
+  // Larger chunks + slower updates = much less React re-rendering
+  const chunkSize = Math.max(20, Math.ceil(safeText.length / 30))
+
+  for (let index = chunkSize; index < safeText.length; index += chunkSize) {
     setText(safeText.slice(0, index))
+
     await new Promise((resolve) => {
-      window.setTimeout(resolve, 18)
+      window.setTimeout(resolve, 35)
     })
   }
 
+  // Always finish with the complete answer
   setText(safeText)
 }
 
@@ -223,7 +234,7 @@ function App() {
     }
 
     const intervalId = window.setInterval(() => {
-      loadDocuments().catch(() => {})
+      loadDocuments().catch(() => { })
     }, 2500)
 
     return () => {
@@ -445,25 +456,27 @@ function App() {
         }
       })
 
-      await revealTextGradually(result.answer, (streamText) => {
-        setMessagesBySession((current) => {
-          const currentMessages = [...(current[resolvedSessionId] || [])]
-          if (!currentMessages.length) {
-            return current
-          }
+setMessagesBySession((current) => {
+  const currentMessages = [...(current[resolvedSessionId] || [])]
 
-          currentMessages[currentMessages.length - 1] = {
-            role: 'assistant',
-            content: streamText,
-            createdAt: new Date().toISOString(),
-          }
+  if (!currentMessages.length) {
+    return current
+  }
 
-          return {
-            ...current,
-            [resolvedSessionId]: currentMessages,
-          }
-        })
-      })
+  const updatedMessages = [...currentMessages]
+
+  updatedMessages[updatedMessages.length - 1] = {
+    ...updatedMessages[updatedMessages.length - 1],
+    role: 'assistant',
+    content: result.answer,
+    references: result.references || [],
+  }
+
+  return {
+    ...current,
+    [resolvedSessionId]: updatedMessages,
+  }
+})
 
       setSourcesBySession((current) => ({
         ...current,
@@ -483,8 +496,8 @@ function App() {
     return (
       <main className="auth-shell">
         <section className="auth-card">
-          <p className="badge">KnowledgePilot AI</p>
-          <h1>Phase 5 Workspace</h1>
+          <p className="badge">*beta</p>
+          <h1>KnowledgePilot AI</h1>
           <p className="subtitle">Sign in to upload files and chat over your own document context.</p>
           <div className="mode-row">
             <button
@@ -526,10 +539,47 @@ function App() {
             <button type="submit" disabled={authLoading}>
               {authLoading ? 'Working...' : authMode === 'login' ? 'Enter workspace' : 'Create account'}
             </button>
+            <GoogleLogin
+              onSuccess={async (credentialResponse) => {
+                setAuthLoading(true)
+                setAuthError('')
+
+                try {
+                  const result = await fetch(`${API_BASE}/auth/google`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      credential: credentialResponse.credential,
+                    }),
+                  })
+
+                  const payload = await result.json()
+
+                  if (!result.ok) {
+                    throw new Error(payload?.error || 'Google authentication failed')
+                  }
+
+                  const nextToken = payload.token
+
+                  localStorage.setItem(TOKEN_STORAGE_KEY, nextToken)
+                  setToken(nextToken)
+                  setPassword('')
+                } catch (error) {
+                  setAuthError(error.message)
+                } finally {
+                  setAuthLoading(false)
+                }
+              }}
+              onError={() => {
+                setAuthError('Google Login Failed')
+              }}
+            />
           </form>
           {authError ? <p className="error">{authError}</p> : null}
           <p className="hint">
-            For production, switch to httpOnly cookies. This demo stores the JWT in localStorage.
+            @HarshTripathi
           </p>
         </section>
       </main>
