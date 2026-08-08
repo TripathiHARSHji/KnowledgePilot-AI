@@ -148,6 +148,11 @@ ChatSession.init(
       allowNull: false,
       field: 'user_id',
     },
+    externalId: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      field: 'external_id',
+    },
   },
   {
     sequelize,
@@ -215,6 +220,15 @@ async function initDatabase() {
   );
   await sequelize.query(
     'CREATE INDEX IF NOT EXISTS chunks_embedding_vector_ivfflat_idx ON chunks USING ivfflat (embedding_vector vector_cosine_ops) WITH (lists = 100);'
+  );
+  await sequelize.query(
+    'ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS external_id TEXT;'
+  );
+  await sequelize.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_user_external_idx ON chat_sessions (user_id, external_id);'
+  );
+  await sequelize.query(
+    'CREATE INDEX IF NOT EXISTS chat_messages_session_created_idx ON chat_messages (session_id, created_at);'
   );
 }
 

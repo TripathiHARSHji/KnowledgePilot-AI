@@ -66,5 +66,6 @@ function shouldUseTls(url) {
 module.exports = {
   connectRedis,
   disconnectRedis,
+  getRedisClient,
   pingRedis,
 };
