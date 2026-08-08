@@ -1,12 +1,16 @@
-const { query } = require('../db');
+const { User } = require('../db');
 
 async function findUserById(userId) {
-  const result = await query(
-    'SELECT id, email, created_at FROM users WHERE id = $1',
-    [userId]
-  );
+  const user = await User.findByPk(userId);
+  if (!user) {
+    return null;
+  }
 
-  return result.rows[0] || null;
+  return {
+    id: user.id,
+    email: user.email,
+    created_at: user.created_at || user.createdAt,
+  };
 }
 
 module.exports = {

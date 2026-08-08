@@ -1,38 +1,225 @@
-const fs = require('node:fs');
-const path = require('node:path');
-const { Pool } = require('pg');
+const { Sequelize, DataTypes, Model } = require('sequelize');
 
 const connectionString = process.env.DATABASE_URL;
+const embeddingDimensions = Number(process.env.EMBEDDING_DIMENSIONS || 768);
 
 if (!connectionString) {
   throw new Error('DATABASE_URL is required');
 }
 
-const pool = new Pool({
-  connectionString,
-  ssl: shouldUseSsl(connectionString)
+const sequelize = new Sequelize(connectionString, {
+  dialect: 'postgres',
+  logging: false,
+  dialectOptions: shouldUseSsl(connectionString)
     ? {
-        rejectUnauthorized: false,
+        ssl: {
+          rejectUnauthorized: false,
+        },
       }
-    : false,
+    : undefined,
 });
 
+class User extends Model {}
+
+User.init(
+  {
+    id: {
+      type: DataTypes.BIGINT,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    email: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      unique: true,
+    },
+    passwordHash: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      field: 'password_hash',
+    },
+  },
+  {
+    sequelize,
+    modelName: 'User',
+    tableName: 'users',
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: false,
+  }
+);
+
+class Document extends Model {}
+
+Document.init(
+  {
+    id: {
+      type: DataTypes.BIGINT,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    userId: {
+      type: DataTypes.BIGINT,
+      allowNull: false,
+      field: 'user_id',
+    },
+    filename: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+    status: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      defaultValue: 'processing',
+    },
+  },
+  {
+    sequelize,
+    modelName: 'Document',
+    tableName: 'documents',
+    timestamps: true,
+    createdAt: 'uploaded_at',
+    updatedAt: false,
+  }
+);
+
+class Chunk extends Model {}
+
+Chunk.init(
+  {
+    id: {
+      type: DataTypes.BIGINT,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    documentId: {
+      type: DataTypes.BIGINT,
+      allowNull: false,
+      field: 'document_id',
+    },
+    userId: {
+      type: DataTypes.BIGINT,
+      allowNull: false,
+      field: 'user_id',
+    },
+    content: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+    metadata: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {},
+    },
+    embeddingId: {
+      type: DataTypes.TEXT,
+      field: 'embedding_id',
+    },
+    vectorRef: {
+      type: DataTypes.TEXT,
+      field: 'vector_ref',
+    },
+    embeddingVector: {
+      type: DataTypes.TEXT,
+      field: 'embedding_vector',
+    },
+  },
+  {
+    sequelize,
+    modelName: 'Chunk',
+    tableName: 'chunks',
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: false,
+  }
+);
+
+class ChatSession extends Model {}
+
+ChatSession.init(
+  {
+    id: {
+      type: DataTypes.BIGINT,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    userId: {
+      type: DataTypes.BIGINT,
+      allowNull: false,
+      field: 'user_id',
+    },
+  },
+  {
+    sequelize,
+    modelName: 'ChatSession',
+    tableName: 'chat_sessions',
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: false,
+  }
+);
+
+class ChatMessage extends Model {}
+
+ChatMessage.init(
+  {
+    id: {
+      type: DataTypes.BIGINT,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    sessionId: {
+      type: DataTypes.BIGINT,
+      allowNull: false,
+      field: 'session_id',
+    },
+    role: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+    content: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+  },
+  {
+    sequelize,
+    modelName: 'ChatMessage',
+    tableName: 'chat_messages',
+    timestamps: true,
+    createdAt: 'created_at',
+    updatedAt: false,
+  }
+);
+
+User.hasMany(Document, { foreignKey: 'userId' });
+Document.belongsTo(User, { foreignKey: 'userId' });
+
+User.hasMany(Chunk, { foreignKey: 'userId' });
+Document.hasMany(Chunk, { foreignKey: 'documentId' });
+Chunk.belongsTo(User, { foreignKey: 'userId' });
+Chunk.belongsTo(Document, { foreignKey: 'documentId' });
+
+User.hasMany(ChatSession, { foreignKey: 'userId' });
+ChatSession.belongsTo(User, { foreignKey: 'userId' });
+
+ChatSession.hasMany(ChatMessage, { foreignKey: 'sessionId' });
+ChatMessage.belongsTo(ChatSession, { foreignKey: 'sessionId' });
+
 async function initDatabase() {
-  const schemaPath = path.join(__dirname, '..', 'sql', 'schema.sql');
-  const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-  await pool.query(schemaSql);
+  await sequelize.authenticate();
+  await sequelize.query('CREATE EXTENSION IF NOT EXISTS vector;');
+  await sequelize.sync();
+  await sequelize.query(
+    `ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_vector vector(${embeddingDimensions});`
+  );
+  await sequelize.query(
+    'CREATE INDEX IF NOT EXISTS chunks_embedding_vector_ivfflat_idx ON chunks USING ivfflat (embedding_vector vector_cosine_ops) WITH (lists = 100);'
+  );
 }
 
 async function closeDatabase() {
-  await pool.end();
-}
-
-async function query(text, params) {
-  return pool.query(text, params);
-}
-
-async function getClient() {
-  return pool.connect();
+  await sequelize.close();
 }
 
 function shouldUseSsl(databaseUrl) {
@@ -49,7 +236,11 @@ function shouldUseSsl(databaseUrl) {
 
 module.exports = {
   closeDatabase,
-  getClient,
   initDatabase,
-  query,
+  sequelize,
+  User,
+  Document,
+  Chunk,
+  ChatSession,
+  ChatMessage,
 };

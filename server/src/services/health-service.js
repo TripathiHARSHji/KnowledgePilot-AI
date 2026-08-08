@@ -1,8 +1,8 @@
-const { query } = require('../db');
+const { sequelize } = require('../db');
 const { pingRedis } = require('../redis');
 
 async function getHealthSnapshot() {
-  await query('SELECT 1');
+  await sequelize.authenticate();
   const redis = await pingRedis();
 
   return {

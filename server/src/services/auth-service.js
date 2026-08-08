@@ -1,7 +1,8 @@
 const bcrypt = require('bcryptjs');
+const { UniqueConstraintError } = require('sequelize');
 const jwt = require('jsonwebtoken');
 
-const { query } = require('../db');
+const { User } = require('../db');
 const { createHttpError } = require('../utils/http-error');
 const { normalizeEmail, validateCredentials } = require('../utils/validators');
 
@@ -11,22 +12,25 @@ async function signupUser(payload) {
   const { email, password } = validateCredentials(payload);
   const normalizedEmail = normalizeEmail(email);
 
-  const existingUser = await query('SELECT id FROM users WHERE email = $1', [normalizedEmail]);
-  if (existingUser.rowCount > 0) {
-    throw createHttpError(409, 'Email is already registered');
+  const passwordHash = await bcrypt.hash(password, 12);
+
+  let user;
+  try {
+    user = await User.create({
+      email: normalizedEmail,
+      passwordHash,
+    });
+  } catch (error) {
+    if (error instanceof UniqueConstraintError) {
+      throw createHttpError(409, 'Email is already registered');
+    }
+
+    throw error;
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
-  const result = await query(
-    `INSERT INTO users (email, password_hash)
-     VALUES ($1, $2)
-     RETURNING id, email, created_at`,
-    [normalizedEmail, passwordHash]
-  );
-
   return {
-    token: signToken(result.rows[0].id),
-    user: result.rows[0],
+    token: signToken(user.id),
+    user: serializeUser(user),
   };
 }
 
@@ -34,17 +38,15 @@ async function loginUser(payload) {
   const { email, password } = validateCredentials(payload);
   const normalizedEmail = normalizeEmail(email);
 
-  const result = await query(
-    'SELECT id, email, password_hash, created_at FROM users WHERE email = $1',
-    [normalizedEmail]
-  );
+  const user = await User.findOne({
+    where: { email: normalizedEmail },
+  });
 
-  if (result.rowCount === 0) {
+  if (!user) {
     throw createHttpError(401, 'Invalid email or password');
   }
 
-  const user = result.rows[0];
-  const passwordMatches = await bcrypt.compare(password, user.password_hash);
+  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
 
   if (!passwordMatches) {
     throw createHttpError(401, 'Invalid email or password');
@@ -52,16 +54,20 @@ async function loginUser(payload) {
 
   return {
     token: signToken(user.id),
-    user: {
-      id: user.id,
-      email: user.email,
-      created_at: user.created_at,
-    },
+    user: serializeUser(user),
   };
 }
 
 function signToken(userId) {
   return jwt.sign({ sub: String(userId) }, jwtSecret, { expiresIn: '7d' });
+}
+
+function serializeUser(user) {
+  return {
+    id: user.id,
+    email: user.email,
+    created_at: user.created_at || user.createdAt,
+  };
 }
 
 module.exports = {

@@ -3,10 +3,126 @@ const cors = require('cors');
 const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const busboy = require('busboy');
 
 const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
+const { listDocumentsForUser, uploadDocument } = require('./services/document-service');
+
+function createSyntheticFile(payload, fallbackName) {
+  if (typeof payload === 'string') {
+    const buffer = Buffer.from(payload, 'utf8');
+    return {
+      buffer,
+      originalname: fallbackName || 'upload.txt',
+      mimetype: 'text/plain',
+      size: buffer.length,
+    };
+  }
+
+  if (Buffer.isBuffer(payload)) {
+    return {
+      buffer: payload,
+      originalname: fallbackName || 'upload.bin',
+      mimetype: 'application/octet-stream',
+      size: payload.length,
+    };
+  }
+
+  if (payload && typeof payload === 'object') {
+    if (Buffer.isBuffer(payload.buffer)) {
+      return {
+        buffer: payload.buffer,
+        originalname: payload.originalname || fallbackName || 'upload.bin',
+        mimetype: payload.mimetype || 'application/octet-stream',
+        size: payload.buffer.length,
+      };
+    }
+
+    if (typeof payload.base64 === 'string') {
+      const buffer = Buffer.from(payload.base64, 'base64');
+      return {
+        buffer,
+        originalname: payload.originalname || fallbackName || 'upload.bin',
+        mimetype: payload.mimetype || 'application/octet-stream',
+        size: buffer.length,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getUploadedFile(request) {
+  const payload = request.body?.file || request.body?.document || request.body?.upload || request.body;
+  if (!payload) {
+    return null;
+  }
+
+  if (typeof payload === 'string' || Buffer.isBuffer(payload) || (payload && typeof payload === 'object')) {
+    return createSyntheticFile(payload, 'upload.txt');
+  }
+
+  return null;
+}
+
+function resolveBusboyFileInfo(fileInfoOrFilename, maybeEncoding, maybeMimeType) {
+  if (fileInfoOrFilename && typeof fileInfoOrFilename === 'object') {
+    return {
+      filename: fileInfoOrFilename.filename,
+      mimetype: fileInfoOrFilename.mimeType || fileInfoOrFilename.mimetype,
+    };
+  }
+
+  return {
+    filename: typeof fileInfoOrFilename === 'string' ? fileInfoOrFilename : undefined,
+    mimetype: maybeMimeType || maybeEncoding,
+  };
+}
+
+function parseMultipartUpload(request) {
+  return new Promise((resolve, reject) => {
+    const contentType = request.headers['content-type'] || '';
+
+    if (!contentType.includes('multipart/form-data')) {
+      resolve(getUploadedFile(request));
+      return;
+    }
+
+    const parser = busboy({ headers: request.headers });
+    let parsedFile = null;
+
+    parser.on('file', (_fieldName, stream, infoOrFilename, encoding, mimeType) => {
+      const fileBuffer = [];
+      const { filename, mimetype } = resolveBusboyFileInfo(infoOrFilename, encoding, mimeType);
+
+      stream.on('data', (chunk) => {
+        fileBuffer.push(chunk);
+      });
+
+      stream.on('end', () => {
+        if (!parsedFile) {
+          const buffer = Buffer.concat(fileBuffer);
+          parsedFile = {
+            buffer,
+            originalname: filename || 'upload.bin',
+            mimetype: mimetype || 'application/octet-stream',
+            size: buffer.length,
+          };
+        }
+      });
+    });
+
+    parser.on('finish', () => {
+      resolve(parsedFile || getUploadedFile(request));
+    });
+
+    parser.on('error', reject);
+
+    request.pipe(parser);
+  });
+}
 
 function buildApp() {
   const app = express();
@@ -15,6 +131,7 @@ function buildApp() {
   app.use(compression());
   app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
   app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use(morgan('dev'));
 
   app.get('/health', async (_request, response, next) => {
@@ -50,6 +167,24 @@ function buildApp() {
         email: request.user.email,
       },
     });
+  });
+  app.post('/documents/upload', authMiddleware, async (request, response, next) => {
+    try {
+      const uploadedFile = await parseMultipartUpload(request);
+      const result = await uploadDocument(request.user.id, uploadedFile);
+      response.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/documents', authMiddleware, async (request, response, next) => {
+    try {
+      const documents = await listDocumentsForUser(request.user.id);
+      response.json({ documents });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.use((error, _request, response, _next) => {

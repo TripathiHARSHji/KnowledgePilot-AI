@@ -1,0 +1,1 @@
+This is a sample document for the Phase 2 ingestion pipeline. It contains enough text to be chunked and stored by the backend. Another paragraph helps ensure the content is split into multiple chunks.
