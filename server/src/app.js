@@ -9,6 +9,7 @@ const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
 const { listDocumentsForUser, uploadDocument } = require('./services/document-service');
+const { queryDocuments, assembleContext } = require('./services/query-service');
 
 function createSyntheticFile(payload, fallbackName) {
   if (typeof payload === 'string') {
@@ -182,6 +183,28 @@ function buildApp() {
     try {
       const documents = await listDocumentsForUser(request.user.id);
       response.json({ documents });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/query', authMiddleware, async (request, response, next) => {
+    try {
+      const { question, topK } = request.body || {};
+      if (!question || typeof question !== 'string') {
+        throw new Error('A text question is required');
+      }
+
+      const result = await queryDocuments(request.user.id, question, { topK });
+      const context = assembleContext(result.chunks || []);
+
+      response.json({
+        question,
+        embeddingModel: result.embeddingModel,
+        retrievedCount: (result.chunks || []).length,
+        context,
+        sources: result.chunks || [],
+      });
     } catch (error) {
       next(error);
     }
