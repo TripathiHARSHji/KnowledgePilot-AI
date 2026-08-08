@@ -9,7 +9,13 @@ const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
 const { listDocumentsForUser, uploadDocument } = require('./services/document-service');
-const { queryDocuments, assembleContext, generateAnswer } = require('./services/query-service');
+const {
+  queryDocuments,
+  assembleContext,
+  generateAnswer,
+  loadSessionHistory,
+  persistSessionTurn,
+} = require('./services/query-service');
 
 function createSyntheticFile(payload, fallbackName) {
   if (typeof payload === 'string') {
@@ -190,17 +196,26 @@ function buildApp() {
 
   app.post('/query', authMiddleware, async (request, response, next) => {
     try {
-      const { question, topK } = request.body || {};
+      const { question, topK, documentId, sessionId } = request.body || {};
       if (!question || typeof question !== 'string') {
         throw new Error('A text question is required');
       }
 
-      const result = await queryDocuments(request.user.id, question, { topK });
+      if (sessionId != null && typeof sessionId !== 'string') {
+        throw new Error('sessionId must be a string when provided');
+      }
+
+      const result = await queryDocuments(request.user.id, question, { topK, documentId });
       const context = assembleContext(result.chunks || []);
+      const history = await loadSessionHistory(request.user.id, sessionId);
 
       console.debug('RAG: retrieved sources count=', (result.chunks || []).length);
 
-      const answer = await generateAnswer(question, context, { maxOutputTokens: 512 });
+      const answer = await generateAnswer(question, context, {
+        maxOutputTokens: 512,
+        history,
+      });
+      await persistSessionTurn(request.user.id, sessionId, question, answer);
 
       // Log retrieved sources for debugging
       console.info('RAG: sources=', (result.chunks || []).map((c) => ({ id: c.id, position: c.metadata?.position })));
@@ -211,6 +226,10 @@ function buildApp() {
         retrievedCount: (result.chunks || []).length,
         context,
         sources: result.chunks || [],
+        session: {
+          id: sessionId || null,
+          memoryTurnCount: history.length,
+        },
         answer,
       });
     } catch (error) {
