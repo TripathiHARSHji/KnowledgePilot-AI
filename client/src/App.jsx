@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const API_BASE = ''
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
 
