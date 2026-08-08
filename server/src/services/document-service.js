@@ -101,9 +101,41 @@ async function extractText(fileBuffer, extension) {
   return normalizeText(fileBuffer.toString('utf8'));
 }
 
-function chunkText(text) {
-  const words = text.split(/\s+/).filter(Boolean);
-  if (words.length === 0) {
+function buildTextSegments(text, extension) {
+  if (extension === '.pdf') {
+    const pages = String(text || '')
+      .split('\f')
+      .map((pageText) => normalizeText(pageText))
+      .filter(Boolean);
+
+    if (pages.length) {
+      return pages.map((pageText, index) => ({
+        text: pageText,
+        page: index + 1,
+      }));
+    }
+  }
+
+  const normalized = normalizeText(String(text || ''));
+  if (!normalized) {
+    return [];
+  }
+
+  return [{ text: normalized, page: 1 }];
+}
+
+function chunkText(segments) {
+  const tokens = (Array.isArray(segments) ? segments : []).flatMap((segment) =>
+    String(segment.text || '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((word) => ({
+        word,
+        page: Number.isInteger(segment.page) && segment.page > 0 ? segment.page : 1,
+      }))
+  );
+
+  if (tokens.length === 0) {
     return [];
   }
 
@@ -111,15 +143,23 @@ function chunkText(text) {
   const overlapWords = 20;
   const chunks = [];
 
-  for (let index = 0; index < words.length; index += targetWords - overlapWords) {
-    const slice = words.slice(index, index + targetWords);
+  for (let index = 0; index < tokens.length; index += targetWords - overlapWords) {
+    const slice = tokens.slice(index, index + targetWords);
     if (!slice.length) {
       break;
     }
 
-    const chunkText = slice.join(' ');
-    if (chunkText.trim()) {
-      chunks.push(chunkText);
+    const chunkContent = slice.map((token) => token.word).join(' ');
+    const pages = slice
+      .map((token) => token.page)
+      .filter((page, pageIndex, values) => values.indexOf(page) === pageIndex);
+
+    if (chunkContent.trim()) {
+      chunks.push({
+        content: chunkContent,
+        pageStart: pages.length ? Math.min(...pages) : null,
+        pageEnd: pages.length ? Math.max(...pages) : null,
+      });
     }
   }
 
@@ -225,12 +265,14 @@ function simpleHash(value) {
 async function uploadDocument(userId, file) {
   const { extension } = validateUpload(file);
   const extractedText = await extractText(file.buffer, extension);
+  const textSegments = buildTextSegments(extractedText, extension);
+  const extractedTextNormalized = textSegments.map((segment) => segment.text).join('\n\n');
 
-  if (!extractedText) {
+  if (!extractedTextNormalized) {
     throw createHttpError(400, 'No text could be extracted from the uploaded file');
   }
 
-  const chunks = chunkText(extractedText);
+  const chunks = chunkText(textSegments);
   if (!chunks.length) {
     throw createHttpError(400, 'The uploaded file did not produce usable content');
   }
@@ -247,15 +289,18 @@ async function uploadDocument(userId, file) {
       { transaction }
     );
 
-    const chunkPayload = await Promise.all(chunks.map(async (chunkContent, index) => {
-      const embedding = await buildEmbedding(chunkContent);
+    const chunkPayload = await Promise.all(chunks.map(async (chunk, index) => {
+      const embedding = await buildEmbedding(chunk.content);
       return {
         documentId: document.id,
         userId,
-        content: chunkContent,
+        content: chunk.content,
         metadata: {
           position: index + 1,
-          chunkSize: chunkContent.length,
+          chunkSize: chunk.content.length,
+          pageStart: chunk.pageStart,
+          pageEnd: chunk.pageEnd,
+          sourceFilename: file.originalname,
           embedding: embedding.values,
           embeddingModel: embedding.model,
         },

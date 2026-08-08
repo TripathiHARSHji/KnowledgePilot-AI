@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
@@ -539,7 +541,7 @@ function App() {
       <header className="topbar">
         <div>
           <p className="badge">KnowledgePilot AI</p>
-          <h1>RAG Command Deck</h1>
+          <h1>KnowledgePilot AI</h1>
         </div>
         <div className="topbar-right">
           <p>{user.email}</p>
@@ -614,7 +616,9 @@ function App() {
             {activeMessages.map((message, index) => (
               <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
                 <p className="role">{message.role}</p>
-                <p>{message.content}</p>
+                <div className="message-content markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                </div>
               </article>
             ))}
           </div>
@@ -693,7 +697,28 @@ function App() {
           {activeSources.map((source, index) => (
             <article key={source.id || index} className="source-item">
               <p>
-                SOURCE {index + 1} | document {source.documentId} | similarity {Number(source.similarity || 0).toFixed(4)}
+                {source.filename || source.metadata?.sourceFilename || `document-${source.documentId}`} | {' '}
+                {(() => {
+                  const pageStart = Number(source.metadata?.pageStart)
+                  const pageEnd = Number(source.metadata?.pageEnd)
+                  const hasPageStart = Number.isInteger(pageStart) && pageStart > 0
+                  const hasPageEnd = Number.isInteger(pageEnd) && pageEnd > 0
+
+                  if (!hasPageStart) {
+                    const fallbackPosition = Number(source.metadata?.position)
+                    if (Number.isInteger(fallbackPosition) && fallbackPosition > 0) {
+                      return `p.${fallbackPosition}`
+                    }
+
+                    return 'p.n/a'
+                  }
+
+                  if (hasPageEnd && pageEnd !== pageStart) {
+                    return `p.${pageStart}-${pageEnd}`
+                  }
+
+                  return `p.${pageStart}`
+                })()} | similarity {Number(source.similarity || 0).toFixed(4)}
               </p>
               <pre>{source.content}</pre>
             </article>

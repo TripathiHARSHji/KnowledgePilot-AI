@@ -18,13 +18,18 @@ const {
   createSessionId,
   deleteSessionForUser,
   queryDocuments,
-  listSessionsForUser,
   assembleContext,
+  ensureAnswerReferences,
   generateAnswer,
-  loadSessionTranscript,
   loadSessionHistory,
   persistSessionTurn,
 } = require('./services/query-service');
+const {
+  listChatSessions,
+  getChatMessages,
+  appendChatTurn,
+  deleteChatSession,
+} = require('./services/chat-history-service');
 
 function createSyntheticFile(payload, fallbackName) {
   if (typeof payload === 'string') {
@@ -223,7 +228,7 @@ function buildApp() {
 
   app.get('/sessions', authMiddleware, async (request, response, next) => {
     try {
-      const sessions = await listSessionsForUser(request.user.id);
+      const sessions = await listChatSessions(request.user.id);
       response.json({ sessions });
     } catch (error) {
       next(error);
@@ -232,7 +237,7 @@ function buildApp() {
 
   app.get('/sessions/:sessionId/messages', authMiddleware, async (request, response, next) => {
     try {
-      const history = await loadSessionTranscript(request.user.id, request.params.sessionId);
+      const history = await getChatMessages(request.user.id, request.params.sessionId);
       response.json({
         sessionId: request.params.sessionId,
         messages: history,
@@ -244,7 +249,10 @@ function buildApp() {
 
   app.delete('/sessions/:sessionId', authMiddleware, async (request, response, next) => {
     try {
-      await deleteSessionForUser(request.user.id, request.params.sessionId);
+      await Promise.all([
+        deleteSessionForUser(request.user.id, request.params.sessionId),
+        deleteChatSession(request.user.id, request.params.sessionId),
+      ]);
       response.status(204).send();
     } catch (error) {
       next(error);
@@ -274,7 +282,13 @@ function buildApp() {
         maxOutputTokens: 512,
         history,
       });
-      await persistSessionTurn(request.user.id, resolvedSessionId, question, answer);
+      const answerWithReferences = ensureAnswerReferences(answer, result.chunks || []);
+      await Promise.all([
+        persistSessionTurn(request.user.id, resolvedSessionId, question, answerWithReferences),
+        appendChatTurn(request.user.id, resolvedSessionId, question, answerWithReferences).catch((error) => {
+          console.error('Failed to persist chat turn to Postgres', error);
+        }),
+      ]);
 
       // Log retrieved sources for debugging
       console.info('RAG: sources=', (result.chunks || []).map((c) => ({ id: c.id, position: c.metadata?.position })));
@@ -289,7 +303,7 @@ function buildApp() {
           id: resolvedSessionId,
           memoryTurnCount: history.length,
         },
-        answer,
+        answer: answerWithReferences,
       });
     } catch (error) {
       next(error);

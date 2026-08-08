@@ -223,6 +223,44 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.message-content {
+  font-size: 1.02rem;
+  line-height: 1.55;
+}
+
+.markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p {
+  margin: 0.35rem 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.4rem 0 0.4rem 1.2rem;
+  padding: 0;
+}
+
+.markdown-body li {
+  margin: 0.18rem 0;
+}
+
+.markdown-body strong {
+  color: #2f261b;
+}
+
+.markdown-body code {
+  background: rgba(84, 67, 41, 0.1);
+  border-radius: 6px;
+  padding: 0.08rem 0.35rem;
+  font-size: 0.9em;
+}
+
 .role {
   text-transform: uppercase;
   letter-spacing: 0.1em;
