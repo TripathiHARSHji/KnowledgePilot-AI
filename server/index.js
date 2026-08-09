@@ -1,29 +1,48 @@
-require('dotenv').config();
+// NEW: only load .env locally. In production (Railway), env vars are
+// injected by the platform — requiring dotenv there is unnecessary,
+// and this guard also means dotenv doesn't need to be a production
+// dependency at all.
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
 
 const { buildApp } = require('./src/app');
 const { initDatabase, closeDatabase } = require('./src/db');
-const { connectRedis, disconnectRedis } = require('./src/redis');
 
-const port = Number(process.env.PORT || 8080);
+// NEW: Railway assigns a random port at runtime via process.env.PORT.
+// 8080 is only a local fallback for `node server/index.js` outside
+// a container.
+const PORT = Number(process.env.PORT) || 8080;
 
 async function start() {
   await initDatabase();
-  await connectRedis();
 
   const app = buildApp();
-  const server = app.listen(port, () => {
-    console.log(`KnowledgePilot server listening on port ${port}`);
+
+  const server = app.listen(PORT, () => {
+    console.log(`KnowledgePilot AI server listening on port ${PORT}`);
   });
 
-  const shutdown = async () => {
-    server.close(async () => {
-      await Promise.allSettled([closeDatabase(), disconnectRedis()]);
-      process.exit(0);
-    });
-  };
+  async function shutdown(signal) {
+    console.log(`${signal} received — shutting down gracefully`);
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+    server.close(async () => {
+      try {
+        await closeDatabase();
+      } catch (error) {
+        console.error('Error while closing database connection', error);
+      } finally {
+        process.exit(0);
+      }
+    });
+
+    // Force-exit if connections don't close within 10s (e.g. a
+    // Railway deploy/restart shouldn't hang indefinitely).
+    setTimeout(() => process.exit(1), 10000).unref();
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 start().catch((error) => {

@@ -1,9 +1,28 @@
+const path = require('path');
+
 const compression = require('compression');
 const cors = require('cors');
 const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const busboy = require('busboy');
+
+// NEW: the Dockerfile copies the built React app to client/dist
+// (see repo root Dockerfile), sitting alongside server/ inside the
+// image. This resolves to that folder regardless of where the
+// process is started from.
+const CLIENT_DIST_PATH = path.join(__dirname, '../../client/dist');
+
+// NEW: request paths that are real API routes, not SPA pages. Used
+// below so the catch-all doesn't swallow a typo'd or unauthenticated
+// API call and silently return index.html instead of a proper 404/401.
+const API_PATH_PREFIXES = ['/auth', '/documents', '/sessions', '/query', '/health', '/me'];
+
+function isApiPath(requestPath) {
+  return API_PATH_PREFIXES.some(
+    (prefix) => requestPath === prefix || requestPath.startsWith(`${prefix}/`)
+  );
+}
 
 const { googleLogin } = require('./services/auth-service');
 const { authMiddleware } = require('./middleware/auth');
@@ -323,6 +342,30 @@ const answer = await generateAnswer(question, context, {
       next(error);
     }
   });
+
+  // NEW: serve the built React app from the same container/port as
+  // the API. This has to come after every API route above so those
+  // routes are matched first — express checks routes in order.
+  app.use(express.static(CLIENT_DIST_PATH));
+
+  // NEW: SPA fallback. Any GET that isn't an API route falls through
+  // to index.html so client-side routing (refreshing on a deep link,
+  // etc.) works. API paths are explicitly excluded and passed to
+  // next() so a bad/unauthenticated API call still gets a real
+  // error response instead of silently getting HTML back.
+  app.get('*', (request, response, next) => {
+    if (isApiPath(request.path)) {
+      next();
+      return;
+    }
+
+    response.sendFile(path.join(CLIENT_DIST_PATH, 'index.html'), (error) => {
+      if (error) {
+        next(error);
+      }
+    });
+  });
+
   app.use((error, _request, response, _next) => {
     const statusCode = error.statusCode || 500;
     const payload = {
