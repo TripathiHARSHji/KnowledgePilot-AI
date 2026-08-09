@@ -35,8 +35,26 @@ User.init(
     },
     passwordHash: {
       type: DataTypes.TEXT,
-      allowNull: false,
+      // NEW: nullable now because Google-only accounts have no password.
+      // "Password required for direct signup" is enforced in
+      // auth-service.js at signup time, not at the DB level.
+      allowNull: true,
       field: 'password_hash',
+    },
+    // NEW: display name. Required at signup time (direct or Google) —
+    // enforced in auth-service.js, kept nullable here so existing rows
+    // don't break `sync()`.
+    name: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    // NEW: avatar image URL. Populated from the Google profile picture
+    // when logging in via Google; left null for direct signups (the
+    // frontend falls back to initials-based avatars in that case).
+    avatarUrl: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'avatar_url',
     },
   },
   {
@@ -229,6 +247,20 @@ async function initDatabase() {
   );
   await sequelize.query(
     'CREATE INDEX IF NOT EXISTS chat_messages_session_created_idx ON chat_messages (session_id, created_at);'
+  );
+
+  // NEW: name / avatar for the "mandatory name + Google photo" feature.
+  // Nullable at the DB level on purpose (see comments on the model above) —
+  // existing rows won't break, and application code enforces "required"
+  // for new signups.
+  await sequelize.query(
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;'
+  );
+  await sequelize.query(
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;'
+  );
+  await sequelize.query(
+    'ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;'
   );
 }
 

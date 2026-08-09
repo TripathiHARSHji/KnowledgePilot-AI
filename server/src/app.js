@@ -185,6 +185,10 @@ function buildApp() {
       user: {
         id: request.user.id,
         email: request.user.email,
+        // NEW: name + avatarUrl so the UI can render "logged in as"
+        // without guessing.
+        name: request.user.name || null,
+        avatarUrl: request.user.avatarUrl || null,
       },
     });
   });

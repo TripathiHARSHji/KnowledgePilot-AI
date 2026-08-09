@@ -7,6 +7,7 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
 const TOP_K_STORAGE_KEY = 'knowledgepilot.topK'
+const THEME_STORAGE_KEY = 'knowledgepilot.theme'
 
 // NEW: keep this in sync with MIN_TOP_K / MAX_TOP_K on the server
 // (server/src/services/chat-history-service.js). If you change the
@@ -20,6 +21,49 @@ const TOP_K_DEFAULT = 6
 const DEFAULT_TIMEOUT_MS = 30000
 const QUERY_TIMEOUT_MS = 90000
 
+// NEW: strips the auto-appended "References:" block from an answer
+// so the chat bubble stays clean — the same information is available
+// per-message via the "Sources" dropdown instead of dumped as text.
+const REFERENCES_BLOCK_PATTERN = /\n{1,2}References:\n(?:-.*(?:\n|$))+$/i
+
+function stripReferencesBlock(text) {
+  return String(text || '').replace(REFERENCES_BLOCK_PATTERN, '').trim()
+}
+
+function getInitials(name, email) {
+  const source = (name || '').trim() || (email || '').trim()
+  if (!source) {
+    return '?'
+  }
+
+  const parts = source.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase()
+  }
+
+  return source.slice(0, 2).toUpperCase()
+}
+
+function formatSourceLabel(source) {
+  const filename = source.filename || source.metadata?.sourceFilename || `document-${source.documentId}`
+  const pageStart = Number(source.metadata?.pageStart)
+  const pageEnd = Number(source.metadata?.pageEnd)
+  const hasPageStart = Number.isInteger(pageStart) && pageStart > 0
+  const hasPageEnd = Number.isInteger(pageEnd) && pageEnd > 0
+
+  let page = 'p.n/a'
+  if (hasPageStart) {
+    page = hasPageEnd && pageEnd !== pageStart ? `p.${pageStart}-${pageEnd}` : `p.${pageStart}`
+  } else {
+    const fallbackPosition = Number(source.metadata?.position)
+    if (Number.isInteger(fallbackPosition) && fallbackPosition > 0) {
+      page = `p.${fallbackPosition}`
+    }
+  }
+
+  return { filename, page }
+}
+
 function buildSessionId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID()
@@ -28,40 +72,13 @@ function buildSessionId() {
   return `session-${Date.now()}`
 }
 
-async function revealTextGradually(text, setText) {
-  const safeText = String(text || '')
-
-  if (!safeText) {
-    setText('')
-    return
-  }
-
-  // Show short answers immediately
-  if (safeText.length < 150) {
-    setText(safeText)
-    return
-  }
-
-  // Larger chunks + slower updates = much less React re-rendering
-  const chunkSize = Math.max(20, Math.ceil(safeText.length / 30))
-
-  for (let index = chunkSize; index < safeText.length; index += chunkSize) {
-    setText(safeText.slice(0, index))
-
-    await new Promise((resolve) => {
-      window.setTimeout(resolve, 35)
-    })
-  }
-
-  // Always finish with the complete answer
-  setText(safeText)
-}
-
 function App() {
   const [authMode, setAuthMode] = useState('login')
   const [token, setToken] = useState(localStorage.getItem(TOKEN_STORAGE_KEY) || '')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  // NEW: name is required at signup, matching the backend rule.
+  const [name, setName] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
   const [authError, setAuthError] = useState('')
 
@@ -73,10 +90,18 @@ function App() {
   )
 
   const [messagesBySession, setMessagesBySession] = useState({})
-  const [sourcesBySession, setSourcesBySession] = useState({})
   const [question, setQuestion] = useState('')
   const [selectedDocumentId, setSelectedDocumentId] = useState('')
   const [queryLoading, setQueryLoading] = useState(false)
+
+  // NEW: which message's "Sources" dropdown is expanded, keyed by
+  // `${sessionId}:${messageIndex}`.
+  const [openSourceKeys, setOpenSourceKeys] = useState(() => new Set())
+
+  // NEW: dark mode, persisted across visits.
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const accountMenuRef = useRef(null)
 
   // NEW: topK is now a user-controlled setting instead of a hardcoded 4.
   const [topK, setTopK] = useState(() => {
@@ -99,10 +124,6 @@ function App() {
     () => messagesBySession[activeSessionId] || [],
     [messagesBySession, activeSessionId]
   )
-  const activeSources = useMemo(
-    () => sourcesBySession[activeSessionId] || [],
-    [sourcesBySession, activeSessionId]
-  )
   const processingDocumentIds = useMemo(
     () => new Set(documents.filter((document) => document.status === 'processing').map((document) => document.id)),
     [documents]
@@ -111,6 +132,45 @@ function App() {
   useEffect(() => {
     localStorage.setItem(TOP_K_STORAGE_KEY, String(topK))
   }, [topK])
+
+  // NEW: apply the theme to the document root so CSS variables can
+  // switch, and persist the choice.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem(THEME_STORAGE_KEY, theme)
+  }, [theme])
+
+  // NEW: close the account dropdown on outside click.
+  useEffect(() => {
+    if (!accountMenuOpen) {
+      return undefined
+    }
+
+    function handleClickOutside(event) {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
+        setAccountMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [accountMenuOpen])
+
+  function toggleTheme() {
+    setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+  }
+
+  function toggleSourcesFor(key) {
+    setOpenSourceKeys((current) => {
+      const next = new Set(current)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
+      return next
+    })
+  }
 
   // NEW: apiRequest now supports a timeoutMs option and surfaces a
   // clear "timed out" error instead of hanging forever if the server
@@ -198,6 +258,7 @@ function App() {
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
+      sources: [],
     }))
 
     setMessagesBySession((current) => ({
@@ -301,12 +362,16 @@ function App() {
     setAuthError('')
 
     try {
+      const body = authMode === 'signup'
+        ? { email, password, name }
+        : { email, password }
+
       const result = await fetch(`${API_BASE}/auth/${authMode}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(body),
       })
 
       const payload = await result.json()
@@ -333,8 +398,8 @@ function App() {
     setSessions([])
     setDocuments([])
     setMessagesBySession({})
-    setSourcesBySession({})
     setActiveSessionId('')
+    setAccountMenuOpen(false)
   }
 
   async function handleUpload(event) {
@@ -411,10 +476,6 @@ function App() {
       ...current,
       [nextSessionId]: [],
     }))
-    setSourcesBySession((current) => ({
-      ...current,
-      [nextSessionId]: [],
-    }))
     setActiveSessionId(nextSessionId)
   }
 
@@ -427,11 +488,6 @@ function App() {
 
     setSessions((current) => current.filter((session) => session.id !== sessionId))
     setMessagesBySession((current) => {
-      const next = { ...current }
-      delete next[sessionId]
-      return next
-    })
-    setSourcesBySession((current) => {
       const next = { ...current }
       delete next[sessionId]
       return next
@@ -496,42 +552,25 @@ function App() {
       })
 
       const resolvedSessionId = result.session?.id || sessionId
-
-      let baseMessages = []
-      setMessagesBySession((current) => {
-        baseMessages = [...(current[resolvedSessionId] || [])]
-        return {
-          ...current,
-          [resolvedSessionId]: [...baseMessages, { role: 'assistant', content: '' }],
-        }
-      })
+      const sources = Array.isArray(result.sources) ? result.sources : []
 
       setMessagesBySession((current) => {
         const currentMessages = [...(current[resolvedSessionId] || [])]
 
-        if (!currentMessages.length) {
-          return current
-        }
-
-        const updatedMessages = [...currentMessages]
-
-        updatedMessages[updatedMessages.length - 1] = {
-          ...updatedMessages[updatedMessages.length - 1],
+        currentMessages.push({
           role: 'assistant',
           content: result.answer,
-          references: result.references || [],
-        }
+          // NEW: sources travel with the message itself so each
+          // answer gets its own "Sources" dropdown instead of one
+          // shared panel that only ever reflects the last query.
+          sources,
+        })
 
         return {
           ...current,
-          [resolvedSessionId]: updatedMessages,
+          [resolvedSessionId]: currentMessages,
         }
       })
-
-      setSourcesBySession((current) => ({
-        ...current,
-        [resolvedSessionId]: Array.isArray(result.sources) ? result.sources : [],
-      }))
 
       setActiveSessionId(resolvedSessionId)
       await loadSessions()
@@ -551,9 +590,57 @@ function App() {
     }
   }
 
+  async function handleGoogleSuccess(credentialResponse) {
+    setAuthLoading(true)
+    setAuthError('')
+
+    try {
+      const result = await fetch(`${API_BASE}/auth/google`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          credential: credentialResponse.credential,
+        }),
+      })
+
+      const payload = await result.json()
+
+      if (!result.ok) {
+        throw new Error(payload?.error || 'Google authentication failed')
+      }
+
+      const nextToken = payload.token
+
+      localStorage.setItem(TOKEN_STORAGE_KEY, nextToken)
+      setToken(nextToken)
+      setPassword('')
+    } catch (error) {
+      setAuthError(error.message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const themeToggle = (
+    <button
+      type="button"
+      className="theme-toggle"
+      onClick={toggleTheme}
+      aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+    >
+      <span className={`theme-toggle-track ${theme === 'dark' ? 'is-dark' : ''}`}>
+        <span className="theme-toggle-thumb">{theme === 'dark' ? '🌙' : '☀️'}</span>
+      </span>
+    </button>
+  )
+
   if (!token || !user) {
     return (
       <main className="auth-shell">
+        {themeToggle}
         <section className="auth-card">
           <p className="badge">*beta</p>
           <h1>KnowledgePilot AI</h1>
@@ -575,6 +662,19 @@ function App() {
             </button>
           </div>
           <form onSubmit={handleAuthSubmit} className="auth-form">
+            {authMode === 'signup' ? (
+              <label>
+                Name
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Ada Lovelace"
+                  required
+                  maxLength={120}
+                />
+              </label>
+            ) : null}
             <label>
               Email
               <input
@@ -598,43 +698,10 @@ function App() {
             <button type="submit" disabled={authLoading}>
               {authLoading ? 'Working...' : authMode === 'login' ? 'Enter workspace' : 'Create account'}
             </button>
-            <GoogleLogin
-              onSuccess={async (credentialResponse) => {
-                setAuthLoading(true)
-                setAuthError('')
-
-                try {
-                  const result = await fetch(`${API_BASE}/auth/google`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                      credential: credentialResponse.credential,
-                    }),
-                  })
-
-                  const payload = await result.json()
-
-                  if (!result.ok) {
-                    throw new Error(payload?.error || 'Google authentication failed')
-                  }
-
-                  const nextToken = payload.token
-
-                  localStorage.setItem(TOKEN_STORAGE_KEY, nextToken)
-                  setToken(nextToken)
-                  setPassword('')
-                } catch (error) {
-                  setAuthError(error.message)
-                } finally {
-                  setAuthLoading(false)
-                }
-              }}
-              onError={() => {
-                setAuthError('Google Login Failed')
-              }}
-            />
+            <div className="divider"><span>or</span></div>
+            <div className="google-btn-wrap">
+              <GoogleLogin onSuccess={handleGoogleSuccess} onError={() => setAuthError('Google Login Failed')} />
+            </div>
           </form>
           {authError ? <p className="error">{authError}</p> : null}
           <p className="hint">
@@ -653,8 +720,47 @@ function App() {
           <h1>KnowledgePilot AI</h1>
         </div>
         <div className="topbar-right">
-          <p>{user.email}</p>
-          <button type="button" onClick={handleLogout}>Sign out</button>
+          {themeToggle}
+          <div className="account-menu" ref={accountMenuRef}>
+            <button
+              type="button"
+              className="account-trigger"
+              onClick={() => setAccountMenuOpen((current) => !current)}
+            >
+              {user.avatarUrl ? (
+                <img className="avatar avatar-img" src={user.avatarUrl} alt="" referrerPolicy="no-referrer" />
+              ) : (
+                <span className="avatar avatar-initials">{getInitials(user.name, user.email)}</span>
+              )}
+              <span className="account-trigger-text">
+                <span className="account-name">{user.name || user.email}</span>
+                <span className="account-email">{user.email}</span>
+              </span>
+              <span className={`chevron ${accountMenuOpen ? 'open' : ''}`}>▾</span>
+            </button>
+
+            {accountMenuOpen ? (
+              <div className="account-dropdown">
+                <div className="account-dropdown-header">
+                  {user.avatarUrl ? (
+                    <img className="avatar avatar-img avatar-lg" src={user.avatarUrl} alt="" referrerPolicy="no-referrer" />
+                  ) : (
+                    <span className="avatar avatar-initials avatar-lg">{getInitials(user.name, user.email)}</span>
+                  )}
+                  <div>
+                    <p className="account-dropdown-name">{user.name || 'Unnamed'}</p>
+                    <p className="account-dropdown-email">{user.email}</p>
+                    <span className="account-provider-badge">
+                      {user.avatarUrl ? 'Google account' : 'Email account'}
+                    </span>
+                  </div>
+                </div>
+                <button type="button" className="account-dropdown-signout" onClick={handleLogout}>
+                  Sign out
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -692,7 +798,7 @@ function App() {
                     deleteSession(session.id)
                   }}
                 >
-                  x
+                  ×
                 </button>
               </article>
             ))}
@@ -738,14 +844,50 @@ function App() {
             {activeMessages.length === 0 ? (
               <p className="muted">Ask a question about your uploaded material.</p>
             ) : null}
-            {activeMessages.map((message, index) => (
-              <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
-                <p className="role">{message.role}</p>
-                <div className="message-content markdown-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                </div>
-              </article>
-            ))}
+            {activeMessages.map((message, index) => {
+              const sourceKey = `${activeSessionId}:${index}`
+              const hasSources = Array.isArray(message.sources) && message.sources.length > 0
+              const isSourcesOpen = openSourceKeys.has(sourceKey)
+              const displayContent = message.role === 'assistant'
+                ? stripReferencesBlock(message.content)
+                : message.content
+
+              return (
+                <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
+                  <p className="role">{message.role}</p>
+                  <div className="message-content markdown-body">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                  </div>
+                  {hasSources ? (
+                    <div className="source-dropdown">
+                      <button
+                        type="button"
+                        className="source-toggle"
+                        onClick={() => toggleSourcesFor(sourceKey)}
+                      >
+                        {isSourcesOpen ? 'Hide' : 'Show'} sources ({message.sources.length})
+                        <span className={`chevron ${isSourcesOpen ? 'open' : ''}`}>▾</span>
+                      </button>
+                      {isSourcesOpen ? (
+                        <div className="source-dropdown-panel">
+                          {message.sources.map((source, sourceIndex) => {
+                            const { filename, page } = formatSourceLabel(source)
+                            return (
+                              <article key={source.id || sourceIndex} className="source-item">
+                                <p>
+                                  {filename} · {page} · similarity {Number(source.similarity || 0).toFixed(3)}
+                                </p>
+                                <pre>{source.content}</pre>
+                              </article>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              )
+            })}
           </div>
 
           <form className="chat-form" onSubmit={handleAsk}>
@@ -813,44 +955,6 @@ function App() {
             })}
           </div>
         </aside>
-      </section>
-
-      <section className="panel sources-panel">
-        <div className="panel-head">
-          <h2>Sources Used</h2>
-        </div>
-        {activeSources.length === 0 ? <p className="muted">No retrieved chunks yet.</p> : null}
-        <div className="source-list">
-          {activeSources.map((source, index) => (
-            <article key={source.id || index} className="source-item">
-              <p>
-                {source.filename || source.metadata?.sourceFilename || `document-${source.documentId}`} | {' '}
-                {(() => {
-                  const pageStart = Number(source.metadata?.pageStart)
-                  const pageEnd = Number(source.metadata?.pageEnd)
-                  const hasPageStart = Number.isInteger(pageStart) && pageStart > 0
-                  const hasPageEnd = Number.isInteger(pageEnd) && pageEnd > 0
-
-                  if (!hasPageStart) {
-                    const fallbackPosition = Number(source.metadata?.position)
-                    if (Number.isInteger(fallbackPosition) && fallbackPosition > 0) {
-                      return `p.${fallbackPosition}`
-                    }
-
-                    return 'p.n/a'
-                  }
-
-                  if (hasPageEnd && pageEnd !== pageStart) {
-                    return `p.${pageStart}-${pageEnd}`
-                  }
-
-                  return `p.${pageStart}`
-                })()} | similarity {Number(source.similarity || 0).toFixed(4)}
-              </p>
-              <pre>{source.content}</pre>
-            </article>
-          ))}
-        </div>
       </section>
     </main>
   )
