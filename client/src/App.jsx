@@ -3,7 +3,12 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
 import { GoogleLogin } from "@react-oauth/google";
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+// NEW: VITE_API_URL is baked in at build time. If it's not set, a
+// production build now falls back to a relative, same-origin path
+// (the Express server serves both the API and the built client) —
+// previously it fell back to http://localhost:8080, which only ever
+// worked on the machine that built it, never for real users.
+const API_BASE = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:8080')
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
 const TOP_K_STORAGE_KEY = 'knowledgepilot.topK'
