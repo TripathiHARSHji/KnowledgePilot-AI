@@ -17,10 +17,17 @@ const EMBEDDING_FALLBACK =
   String(process.env.EMBEDDING_FALLBACK || 'none')
     .trim()
     .toLowerCase() !== 'none';
+
+// pdf-parse v1 exported a bare callable function. pdf-parse v2 exports a
+// `PDFParse` class instead (require('pdf-parse') no longer returns a
+// function). We keep both detections so this still works if the package
+// is ever downgraded, but on v2 (what this project uses) `pdfParse` below
+// will be falsy and the `PDFParseClass` branch is the one that runs.
 const pdfParse =
   typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule?.default;
 const PDFParseClass =
   typeof pdfParseModule?.PDFParse === 'function' ? pdfParseModule.PDFParse : null;
+
 const ALLOWED_EXTENSIONS = new Set(['.txt', '.pdf', '.docx']);
 const ALLOWED_MIME_TYPES = new Set([
   'text/plain',
@@ -75,56 +82,102 @@ function normalizeText(text) {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-async function extractText(fileBuffer, extension) {
-  if (extension === '.pdf') {
-    if (typeof pdfParse === 'function') {
-      const parsed = await pdfParse(fileBuffer);
-      return normalizeText(parsed.text || '');
-    }
 
-    if (PDFParseClass) {
-      const parser = new PDFParseClass({ data: fileBuffer });
-      try {
-        const parsed = await parser.getText();
-        return normalizeText(parsed.text || '');
-      } finally {
-        await parser.destroy().catch(() => {});
+/* =========================================================
+   PER-TYPE TEXT EXTRACTION -> PAGE-LABELED SEGMENTS
+
+   Each extractor returns Array<{ text, page }>. `page` is the real
+   1-based PDF page number when we have it, or 1 for single-page
+   sources (DOCX/TXT don't have a page concept at extraction time).
+========================================================= */
+
+async function extractPdfSegments(fileBuffer) {
+  if (PDFParseClass) {
+    const parser = new PDFParseClass({ data: fileBuffer });
+    try {
+      const parsed = await parser.getText();
+
+      // pdf-parse v2: `parsed.pages` is Array<{ num, text }> with real
+      // per-page text. This is what was missing before — the old code
+      // only read `parsed.text` (the whole document flattened into one
+      // string) and threw the page breakdown away.
+      const pages = Array.isArray(parsed?.pages) ? parsed.pages : [];
+
+      const segments = pages
+        .map((pageResult) => ({
+          text: normalizeText(String(pageResult?.text || '')),
+          page:
+            Number.isInteger(pageResult?.num) && pageResult.num > 0
+              ? pageResult.num
+              : null,
+        }))
+        .filter((segment) => segment.text);
+
+      if (segments.length) {
+        return segments.map((segment, index) => ({
+          text: segment.text,
+          page: segment.page || index + 1,
+        }));
       }
+
+      // Fallback if a future/older build doesn't populate `.pages`.
+      const normalized = normalizeText(String(parsed?.text || ''));
+      return normalized ? [{ text: normalized, page: 1 }] : [];
+    } finally {
+      await parser.destroy().catch(() => {});
     }
-
-    throw createHttpError(500, 'PDF parser is not available on this server build');
   }
 
-  if (extension === '.docx') {
-    const result = await mammoth.extractRawText({ buffer: fileBuffer });
-    return normalizeText(result.value || '');
-  }
-
-  return normalizeText(fileBuffer.toString('utf8'));
-}
-
-function buildTextSegments(text, extension) {
-  if (extension === '.pdf') {
-    const pages = String(text || '')
+  if (typeof pdfParse === 'function') {
+    // pdf-parse v1 fallback: no true per-page data is available from the
+    // default renderer. We approximate using form-feed markers if the
+    // build happens to emit them, otherwise treat the whole doc as one
+    // page (better than crashing, but page numbers won't be accurate).
+    const parsed = await pdfParse(fileBuffer);
+    const rawText = String(parsed.text || '');
+    const pages = rawText
       .split('\f')
       .map((pageText) => normalizeText(pageText))
       .filter(Boolean);
 
-    if (pages.length) {
-      return pages.map((pageText, index) => ({
-        text: pageText,
-        page: index + 1,
-      }));
+    if (pages.length > 1) {
+      return pages.map((pageText, index) => ({ text: pageText, page: index + 1 }));
     }
+
+    const normalized = normalizeText(rawText);
+    return normalized ? [{ text: normalized, page: 1 }] : [];
   }
 
-  const normalized = normalizeText(String(text || ''));
-  if (!normalized) {
-    return [];
-  }
-
-  return [{ text: normalized, page: 1 }];
+  throw createHttpError(500, 'PDF parser is not available on this server build');
 }
+
+async function extractDocxSegments(fileBuffer) {
+  const result = await mammoth.extractRawText({ buffer: fileBuffer });
+  const normalized = normalizeText(result.value || '');
+  return normalized ? [{ text: normalized, page: 1 }] : [];
+}
+
+function extractTxtSegments(fileBuffer) {
+  const normalized = normalizeText(fileBuffer.toString('utf8'));
+  return normalized ? [{ text: normalized, page: 1 }] : [];
+}
+
+async function extractTextSegments(fileBuffer, extension) {
+  if (extension === '.pdf') {
+    return extractPdfSegments(fileBuffer);
+  }
+
+  if (extension === '.docx') {
+    return extractDocxSegments(fileBuffer);
+  }
+
+  return extractTxtSegments(fileBuffer);
+}
+
+
+/* =========================================================
+   CHUNKING
+========================================================= */
 
 function chunkText(segments) {
   const tokens = (Array.isArray(segments) ? segments : []).flatMap((segment) =>
@@ -208,15 +261,15 @@ async function buildGeminiEmbedding(text) {
     headers: {
       'Content-Type': 'application/json',
     },
-body: JSON.stringify({
-  content: {
-    parts: [{ text }],
-  },
-  embedContentConfig: {
-    taskType: 'RETRIEVAL_DOCUMENT',
-    outputDimensionality: EMBEDDING_DIMENSIONS,
-  },
-}),
+    body: JSON.stringify({
+      content: {
+        parts: [{ text }],
+      },
+      embedContentConfig: {
+        taskType: 'RETRIEVAL_DOCUMENT',
+        outputDimensionality: EMBEDDING_DIMENSIONS,
+      },
+    }),
   });
 
   if (!response.ok) {
@@ -268,8 +321,7 @@ function simpleHash(value) {
 
 async function uploadDocument(userId, file) {
   const { extension } = validateUpload(file);
-  const extractedText = await extractText(file.buffer, extension);
-  const textSegments = buildTextSegments(extractedText, extension);
+  const textSegments = await extractTextSegments(file.buffer, extension);
   const extractedTextNormalized = textSegments.map((segment) => segment.text).join('\n\n');
 
   if (!extractedTextNormalized) {

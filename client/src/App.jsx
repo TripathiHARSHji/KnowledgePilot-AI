@@ -6,6 +6,19 @@ import { GoogleLogin } from "@react-oauth/google";
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
+const TOP_K_STORAGE_KEY = 'knowledgepilot.topK'
+
+// NEW: keep this in sync with MIN_TOP_K / MAX_TOP_K on the server
+// (server/src/services/chat-history-service.js). If you change the
+// env vars there, update these too so the UI slider matches.
+const TOP_K_MIN = 1
+const TOP_K_MAX = 20
+const TOP_K_DEFAULT = 6
+
+// NEW: default request timeout, and a longer one for /query since
+// generation can legitimately take longer than a normal API call.
+const DEFAULT_TIMEOUT_MS = 30000
+const QUERY_TIMEOUT_MS = 90000
 
 function buildSessionId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -65,6 +78,14 @@ function App() {
   const [selectedDocumentId, setSelectedDocumentId] = useState('')
   const [queryLoading, setQueryLoading] = useState(false)
 
+  // NEW: topK is now a user-controlled setting instead of a hardcoded 4.
+  const [topK, setTopK] = useState(() => {
+    const stored = Number(localStorage.getItem(TOP_K_STORAGE_KEY))
+    return Number.isInteger(stored) && stored >= TOP_K_MIN && stored <= TOP_K_MAX
+      ? stored
+      : TOP_K_DEFAULT
+  })
+
   const [uploadFile, setUploadFile] = useState(null)
   const [uploadLoading, setUploadLoading] = useState(false)
   const [uploadError, setUploadError] = useState('')
@@ -72,6 +93,7 @@ function App() {
   const [busyDocumentIds, setBusyDocumentIds] = useState(new Set())
   const [pageError, setPageError] = useState('')
   const messageListRef = useRef(null)
+  const textareaRef = useRef(null)
 
   const activeMessages = useMemo(
     () => messagesBySession[activeSessionId] || [],
@@ -86,12 +108,21 @@ function App() {
     [documents]
   )
 
+  useEffect(() => {
+    localStorage.setItem(TOP_K_STORAGE_KEY, String(topK))
+  }, [topK])
+
+  // NEW: apiRequest now supports a timeoutMs option and surfaces a
+  // clear "timed out" error instead of hanging forever if the server
+  // or an upstream call (e.g. Gemini) never responds.
   const apiRequest = useCallback(async (path, options = {}) => {
+    const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOptions } = options
+
     const headers = {
-      ...(options.headers || {}),
+      ...(fetchOptions.headers || {}),
     }
 
-    if (!(options.body instanceof FormData)) {
+    if (!(fetchOptions.body instanceof FormData)) {
       headers['Content-Type'] = headers['Content-Type'] || 'application/json'
     }
 
@@ -99,20 +130,33 @@ function App() {
       headers.Authorization = `Bearer ${token}`
     }
 
-    const response = await fetch(`${API_BASE}${path}`, {
-      ...options,
-      headers,
-    })
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
 
-    const text = await response.text()
-    const payload = text ? JSON.parse(text) : null
+    try {
+      const response = await fetch(`${API_BASE}${path}`, {
+        ...fetchOptions,
+        headers,
+        signal: controller.signal,
+      })
 
-    if (!response.ok) {
-      const errorMessage = payload?.error || 'Request failed'
-      throw new Error(errorMessage)
+      const text = await response.text()
+      const payload = text ? JSON.parse(text) : null
+
+      if (!response.ok) {
+        const errorMessage = payload?.error || 'Request failed'
+        throw new Error(errorMessage)
+      }
+
+      return payload
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error('Request timed out. The server took too long to respond — please try again.')
+      }
+      throw error
+    } finally {
+      window.clearTimeout(timeoutId)
     }
-
-    return payload
   }, [token])
 
   const loadUserProfile = useCallback(async () => {
@@ -432,7 +476,9 @@ function App() {
     try {
       const payload = {
         question: cleanedQuestion,
-        topK: 4,
+        // NEW: topK comes from the slider/select below instead of a
+        // hardcoded 4, so you can ask for more chunks on a big doc.
+        topK,
         sessionId,
       }
 
@@ -440,9 +486,13 @@ function App() {
         payload.documentId = Number(selectedDocumentId)
       }
 
+      // NEW: give /query a longer timeout since generation can
+      // legitimately take a while, but it will still fail with a
+      // clear error instead of spinning forever.
       const result = await apiRequest('/query', {
         method: 'POST',
         body: JSON.stringify(payload),
+        timeoutMs: QUERY_TIMEOUT_MS,
       })
 
       const resolvedSessionId = result.session?.id || sessionId
@@ -456,27 +506,27 @@ function App() {
         }
       })
 
-setMessagesBySession((current) => {
-  const currentMessages = [...(current[resolvedSessionId] || [])]
+      setMessagesBySession((current) => {
+        const currentMessages = [...(current[resolvedSessionId] || [])]
 
-  if (!currentMessages.length) {
-    return current
-  }
+        if (!currentMessages.length) {
+          return current
+        }
 
-  const updatedMessages = [...currentMessages]
+        const updatedMessages = [...currentMessages]
 
-  updatedMessages[updatedMessages.length - 1] = {
-    ...updatedMessages[updatedMessages.length - 1],
-    role: 'assistant',
-    content: result.answer,
-    references: result.references || [],
-  }
+        updatedMessages[updatedMessages.length - 1] = {
+          ...updatedMessages[updatedMessages.length - 1],
+          role: 'assistant',
+          content: result.answer,
+          references: result.references || [],
+        }
 
-  return {
-    ...current,
-    [resolvedSessionId]: updatedMessages,
-  }
-})
+        return {
+          ...current,
+          [resolvedSessionId]: updatedMessages,
+        }
+      })
 
       setSourcesBySession((current) => ({
         ...current,
@@ -489,6 +539,15 @@ setMessagesBySession((current) => {
       setPageError(error.message)
     } finally {
       setQueryLoading(false)
+    }
+  }
+
+  // NEW: Enter sends the message, Shift+Enter inserts a newline —
+  // no more reaching for the mouse/Send button every time.
+  function handleQuestionKeyDown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      handleAsk(event)
     }
   }
 
@@ -643,20 +702,36 @@ setMessagesBySession((current) => {
         <section className="panel chat-panel">
           <div className="panel-head">
             <h2>Assistant</h2>
-            <label className="document-filter">
-              Scope
-              <select
-                value={selectedDocumentId}
-                onChange={(event) => setSelectedDocumentId(event.target.value)}
-              >
-                <option value="">All documents</option>
-                {documents.map((document) => (
-                  <option key={document.id} value={document.id}>
-                    {document.filename}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="chat-controls">
+              <label className="document-filter">
+                Scope
+                <select
+                  value={selectedDocumentId}
+                  onChange={(event) => setSelectedDocumentId(event.target.value)}
+                >
+                  <option value="">All documents</option>
+                  {documents.map((document) => (
+                    <option key={document.id} value={document.id}>
+                      {document.filename}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {/* NEW: topK control — 4 for a short/simple doc, up to 20
+                  for something like a novel that needs more chunks
+                  retrieved to answer well. */}
+              <label className="topk-filter" title="How many document chunks to retrieve per question">
+                Chunks (topK): {topK}
+                <input
+                  type="range"
+                  min={TOP_K_MIN}
+                  max={TOP_K_MAX}
+                  step={1}
+                  value={topK}
+                  onChange={(event) => setTopK(Number(event.target.value))}
+                />
+              </label>
+            </div>
           </div>
 
           <div className="message-list" ref={messageListRef}>
@@ -675,10 +750,12 @@ setMessagesBySession((current) => {
 
           <form className="chat-form" onSubmit={handleAsk}>
             <textarea
+              ref={textareaRef}
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
+              onKeyDown={handleQuestionKeyDown}
               rows={3}
-              placeholder="Ask a grounded question about your documents..."
+              placeholder="Ask a grounded question about your documents... (Enter to send, Shift+Enter for a new line)"
             />
             <button type="submit" disabled={queryLoading}>
               {queryLoading ? 'Thinking...' : 'Send'}

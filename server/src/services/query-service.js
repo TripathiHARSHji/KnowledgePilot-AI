@@ -31,6 +31,42 @@ const SESSION_INDEX_MAX = Number(
   process.env.SESSION_INDEX_MAX || 30
 );
 
+/*
+ * NEW: configurable retrieval + generation limits.
+ *
+ * MAX_TOP_K is the ceiling the UI is allowed to request (e.g. "12" for
+ * a big document / novel). MIN_TOP_K keeps it sane on the low end.
+ */
+const MIN_TOP_K = Number(process.env.MIN_TOP_K || 1);
+const MAX_TOP_K = Number(process.env.MAX_TOP_K || 20);
+const DEFAULT_TOP_K = Number(process.env.DEFAULT_TOP_K || 6);
+
+/*
+ * NEW: network timeouts so a hung Gemini request can never leave the
+ * frontend stuck on "Thinking..." forever. Node 18+ supports
+ * AbortSignal.timeout natively.
+ */
+const GEMINI_EMBEDDING_TIMEOUT_MS = Number(
+  process.env.GEMINI_EMBEDDING_TIMEOUT_MS || 20000
+);
+
+const GEMINI_GENERATION_TIMEOUT_MS = Number(
+  process.env.GEMINI_GENERATION_TIMEOUT_MS || 45000
+);
+
+/*
+ * NEW: generation token budget. 1024 was cutting off longer, well
+ * cited answers (finishReason: MAX_TOKENS). We now default higher and
+ * auto-retry once with a bigger budget if a response gets truncated.
+ */
+const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = Number(
+  process.env.GEMINI_DEFAULT_MAX_OUTPUT_TOKENS || 4096
+);
+
+const GEMINI_MAX_OUTPUT_TOKENS_CAP = Number(
+  process.env.GEMINI_MAX_OUTPUT_TOKENS_CAP || 8192
+);
+
 
 /* =========================================================
    LOCAL EMBEDDING FALLBACK
@@ -158,6 +194,10 @@ async function buildGeminiEmbeddingForTask(
         outputDimensionality:
           EMBEDDING_DIMENSIONS,
       }),
+
+      signal: AbortSignal.timeout(
+        GEMINI_EMBEDDING_TIMEOUT_MS
+      ),
     }
   );
 
@@ -237,16 +277,21 @@ async function queryDocuments(
   text,
   options = {}
 ) {
+  /*
+   * NEW: topK now comes from the UI (e.g. 4 for a short doc,
+   * up to MAX_TOP_K for something like a novel) instead of being
+   * silently clamped to 12.
+   */
   const requestedTopK = Number(
-    options.topK || 12
+    options.topK ?? DEFAULT_TOP_K
   );
 
   const topK = Number.isInteger(requestedTopK)
     ? Math.min(
-        Math.max(requestedTopK, 1),
-        12
+        Math.max(requestedTopK, MIN_TOP_K),
+        MAX_TOP_K
       )
-    : 6;
+    : DEFAULT_TOP_K;
 
   const parsedDocumentId = Number(
     options.documentId
@@ -340,6 +385,8 @@ async function queryDocuments(
       embeddingModel:
         embedding.model,
 
+      topK,
+
       retrievedCount:
         rows.length,
 
@@ -367,6 +414,8 @@ async function queryDocuments(
   return {
     embeddingModel:
       embedding.model,
+
+    topK,
 
     chunks: rows,
 
@@ -777,9 +826,10 @@ function extractGeminiText(
    GEMINI GENERATION REQUEST
 ========================================================= */
 
-async function buildGeminiGeneration(
+async function requestGeminiGeneration(
   prompt,
-  options = {}
+  maxOutputTokens,
+  options
 ) {
   const body = {
     contents: [
@@ -800,9 +850,7 @@ async function buildGeminiGeneration(
           ? options.temperature
           : 0.35,
 
-      maxOutputTokens:
-        options.maxOutputTokens ||
-        1024,
+      maxOutputTokens,
     },
   };
 
@@ -820,6 +868,10 @@ async function buildGeminiGeneration(
         },
 
         body: JSON.stringify(body),
+
+        signal: AbortSignal.timeout(
+          GEMINI_GENERATION_TIMEOUT_MS
+        ),
       }
     );
 
@@ -835,10 +887,49 @@ async function buildGeminiGeneration(
   const payload =
     await response.json();
 
-  const result =
-    extractGeminiText(
-      payload
+  return extractGeminiText(payload);
+}
+
+
+/*
+ * NEW: buildGeminiGeneration now auto-retries once with a larger
+ * token budget if the first attempt was cut off by MAX_TOKENS. This
+ * is the main fix for "not giving full answer" — previously a
+ * truncated response was just returned as-is.
+ */
+async function buildGeminiGeneration(
+  prompt,
+  options = {}
+) {
+  const requestedMaxTokens =
+    options.maxOutputTokens ||
+    GEMINI_DEFAULT_MAX_OUTPUT_TOKENS;
+
+  let result = await requestGeminiGeneration(
+    prompt,
+    requestedMaxTokens,
+    options
+  );
+
+  if (
+    result.finishReason === 'MAX_TOKENS' &&
+    requestedMaxTokens < GEMINI_MAX_OUTPUT_TOKENS_CAP
+  ) {
+    const retryMaxTokens = Math.min(
+      requestedMaxTokens * 2,
+      GEMINI_MAX_OUTPUT_TOKENS_CAP
     );
+
+    console.warn(
+      `Gemini response truncated at ${requestedMaxTokens} tokens. Retrying with ${retryMaxTokens}.`
+    );
+
+    result = await requestGeminiGeneration(
+      prompt,
+      retryMaxTokens,
+      options
+    );
+  }
 
   if (!result.text) {
     throw new Error(
@@ -851,7 +942,7 @@ async function buildGeminiGeneration(
     'MAX_TOKENS'
   ) {
     console.warn(
-      'Gemini response reached max output tokens'
+      'Gemini response reached max output tokens even after retry'
     );
   }
 
@@ -1378,12 +1469,18 @@ async function generateAnswer(
       error
     );
 
+    const isTimeout =
+      error?.name === 'TimeoutError' ||
+      error?.name === 'AbortError';
+
     /*
      * Never silently throw away retrieved RAG context.
      */
     if (context) {
       return [
-        'I could not generate the final AI response.',
+        isTimeout
+          ? 'The AI response timed out before finishing.'
+          : 'I could not generate the final AI response.',
         '',
         'Here is the retrieved document context:',
         '',
@@ -1391,7 +1488,9 @@ async function generateAnswer(
       ].join('\n');
     }
 
-    return `I could not generate the final AI response: ${error.message}`;
+    return isTimeout
+      ? 'The AI response timed out before finishing. Please try again.'
+      : `I could not generate the final AI response: ${error.message}`;
   }
 }
 
@@ -1420,4 +1519,10 @@ module.exports = {
   assembleContext,
 
   generateAnswer,
+
+  MIN_TOP_K,
+
+  MAX_TOP_K,
+
+  DEFAULT_TOP_K,
 };
