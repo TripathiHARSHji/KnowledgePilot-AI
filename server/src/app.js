@@ -170,9 +170,27 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "https://accounts.google.com"],
-        connectSrc: ["'self'", "https://accounts.google.com"],
-        frameSrc: ["'self'", "https://accounts.google.com"],
+
+        scriptSrc: [
+          "'self'",
+          "https://accounts.google.com",
+        ],
+
+        connectSrc: [
+          "'self'",
+          "https://accounts.google.com",
+        ],
+
+        frameSrc: [
+          "'self'",
+          "https://accounts.google.com",
+        ],
+
+        imgSrc: [
+          "'self'",
+          "data:",
+          "https://lh3.googleusercontent.com",
+        ],
       },
     },
   })
