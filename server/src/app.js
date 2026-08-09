@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const busboy = require('busboy');
 
+const { googleLogin } = require('./services/auth-service');
 const { authMiddleware } = require('./middleware/auth');
 const { loginUser, signupUser } = require('./services/auth-service');
 const { getHealthSnapshot } = require('./services/health-service');
@@ -30,7 +31,6 @@ const {
   appendChatTurn,
   deleteChatSession,
 } = require('./services/chat-history-service');
-
 function createSyntheticFile(payload, fallbackName) {
   if (typeof payload === 'string') {
     const buffer = Buffer.from(payload, 'utf8');
@@ -172,7 +172,6 @@ function buildApp() {
       next(error);
     }
   });
-
   app.post('/auth/login', async (request, response, next) => {
     try {
       const result = await loginUser(request.body);
@@ -186,6 +185,10 @@ function buildApp() {
       user: {
         id: request.user.id,
         email: request.user.email,
+        // NEW: name + avatarUrl so the UI can render "logged in as"
+        // without guessing.
+        name: request.user.name || null,
+        avatarUrl: request.user.avatarUrl || null,
       },
     });
   });
@@ -277,11 +280,11 @@ function buildApp() {
       const history = await loadSessionHistory(request.user.id, resolvedSessionId);
 
       console.debug('RAG: retrieved sources count=', (result.chunks || []).length);
-
-      const answer = await generateAnswer(question, context, {
-        maxOutputTokens: 512,
-        history,
-      });
+const answer = await generateAnswer(question, context, {
+  maxOutputTokens: 1024,
+  temperature: 0.35,
+  history,
+});
       const answerWithReferences = ensureAnswerReferences(answer, result.chunks || []);
       await Promise.all([
         persistSessionTurn(request.user.id, resolvedSessionId, question, answerWithReferences),
@@ -309,7 +312,17 @@ function buildApp() {
       next(error);
     }
   });
+  app.post('/auth/google', async (request, response, next) => {
+    try {
+      const { credential } = request.body;
 
+      const result = await googleLogin(credential);
+
+      response.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
   app.use((error, _request, response, _next) => {
     const statusCode = error.statusCode || 500;
     const payload = {
