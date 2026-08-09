@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './App.css'
 import { GoogleLogin } from "@react-oauth/google";
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const API_BASE = ''
 const TOKEN_STORAGE_KEY = 'knowledgepilot.token'
 const ACTIVE_SESSION_STORAGE_KEY = 'knowledgepilot.activeSessionId'
 const TOP_K_STORAGE_KEY = 'knowledgepilot.topK'
